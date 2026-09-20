@@ -1,10 +1,10 @@
+import os
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import onnxruntime as ort
-import numpy as np
 
-app = FastAPI(title="Signal AMC API")
+app = FastAPI(title="AMC Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,22 +15,41 @@ app.add_middleware(
 )
 
 CLASSES = ['BPSK', 'QPSK', '8PSK', '16QAM', 'PAM4', 'GFSK']
-session = ort.InferenceSession("rf_classifier.onnx")
+
+# Model load with error handling
+session = None
+model_path = os.path.join(os.path.dirname(__file__), "rf_classifier.onnx")
+
+try:
+    import onnxruntime as ort
+    if os.path.exists(model_path):
+        session = ort.InferenceSession(model_path)
+        print("ONNX model loaded successfully.")
+    else:
+        print(f"Warning: {model_path} not found.")
+except Exception as e:
+    print(f"Model load error: {e}")
 
 class SignalPayload(BaseModel):
     signal: list[list[float]]
 
 @app.get("/")
 def health():
-    return {"status": "online", "model": "rf_classifier.onnx"}
+    return {
+        "status": "online",
+        "model_loaded": session is not None
+    }
 
 @app.post("/predict")
 def predict(payload: SignalPayload):
+    if session is None:
+        raise HTTPException(status_code=500, detail="ONNX model session not initialized.")
+
     data = np.array(payload.signal, dtype=np.float32)
     if data.shape != (2, 128):
         raise HTTPException(status_code=400, detail=f"Expected shape (2, 128), got {data.shape}")
     
-    # Power normalization
+    # Unit energy normalization
     norm = np.sqrt(np.mean(data[0]**2 + data[1]**2)) + 1e-8
     data = data / norm
     input_tensor = np.expand_dims(data, axis=0)
@@ -52,3 +71,8 @@ def predict(payload: SignalPayload):
         "confidence": ranked[0]["confidence"],
         "rankings": ranked
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
